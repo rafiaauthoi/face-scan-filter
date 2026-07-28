@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Face Scan Filter</title>
+  <script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
+  <style>
+    body {
+      background-color: #050505;
+      color: #eaeaea;
+      font-family: monospace;
+      text-align: center;
+      padding-top: 30px;
+      margin: 0;
+    }
+
+    h1 {
+      color: #ff2fb0;
+      text-shadow: 0 0 12px #ff2fb0;
+      letter-spacing: 2px;
+    }
+
+    #startButton, #captureButton {
+      background-color: #ff2fb0;
+      color: #0a0a0a;
+      border: none;
+      padding: 12px 24px;
+      font-family: monospace;
+      font-size: 14px;
+      font-weight: bold;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+
+    #startButton:hover, #captureButton:hover {
+      background-color: #ff5fc4;
+    }
+
+    #captureButton {
+      display: none;
+      background-color: #7fffd4;
+      color: #050505;
+    }
+
+    #captureButton:hover {
+      background-color: #a3ffe4;
+    }
+
+    #video-wrapper {
+      position: relative;
+      width: 65vw;
+      max-width: 950px;
+      aspect-ratio: 4 / 3;
+      margin: 20px auto 0;
+      border: 2px solid #ff2fb0;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 0 30px rgba(255, 47, 176, 0.4);
+      background-color: #000;
+    }
+
+    video {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      transform: scaleX(-1);
+    }
+
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      transform: scaleX(-1);
+    }
+
+    #flash-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(255, 255, 255, 0.9);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.5s ease;
+    }
+
+    #status {
+      margin-top: 14px;
+      font-size: 14px;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>FACE SCAN FILTER</h1>
+  <button id="startButton">Start Scan</button>
+  <button id="captureButton">Capture Snapshot</button>
+
+  <div id="video-wrapper">
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="overlay" width="960" height="720"></canvas>
+    <div id="flash-overlay"></div>
+  </div>
+  <p id="status">Click "Start Scan" to begin.</p>
+
+  <script type="module">
+    import {
+      FaceLandmarker,
+      FilesetResolver
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    const video = document.getElementById('webcam');
+    const canvas = document.getElementById('overlay');
+    const ctx = canvas.getContext('2d');
+    const status = document.getElementById('status');
+    const startButton = document.getElementById('startButton');
+    const captureButton = document.getElementById('captureButton');
+    const flashOverlay = document.getElementById('flash-overlay');
+
+    let faceLandmarker;
+    let audioReady = false;
+    let scanBeep, shutterNoise, lockChime;
+
+    const LOCK_HOLD_MS = 2000;
+    const SMILE_RATIO_THRESHOLD = 0.95;
+
+    const READOUTS = [
+      'IDENTITY: UNKNOWN',
+      'NEURAL PATTERN: STABLE',
+      'THREAT LEVEL: MINIMAL',
+      'AURA COLOR: NEON PINK',
+      'STATUS: HUMAN CONFIRMED',
+      'ANOMALY DETECTED: NONE',
+      'CLEARANCE: GRANTED',
+      'BIOSIGNATURE: NOMINAL'
+    ];
+
+    const FACE_OUTLINE = [
+      10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+      397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+      172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109, 10
+    ];
+    const LEFT_EYE = [33, 160, 158, 133, 153, 144, 33];
+    const RIGHT_EYE = [362, 385, 387, 263, 373, 380, 362];
+    const LIPS = [61, 39, 0, 269, 291, 405, 17, 181, 61];
+
+    let scanLineProgress = 0;
+    let burstParticles = [];
+
+    // per-face-slot state, index 0 and 1 correspond to whichever faces MediaPipe
+    // returns first and second in a given frame
+    let lockProgress = [0, 0];
+    let isLocked = [false, false];
+    let wasFacePresent = [false, false];
+    let readoutIndex = [0, 0];
+    let lastReadoutSwitch = [0, 0];
+    const READOUT_INTERVAL_MS = 2200;
+
+    async function setupAudio() {
+      await Tone.start();
+
+      scanBeep = new Tone.Synth({
+        oscillator: { type: 'sine' },
+        envelope: { attack: 0.01, decay: 0.1, sustain: 0, release: 0.1 }
+      }).toDestination();
+      scanBeep.volume.value = -10;
+
+      shutterNoise = new Tone.NoiseSynth({
+        noise: { type: 'white' },
+        envelope: { attack: 0.001, decay: 0.05, sustain: 0 }
+      }).toDestination();
+      shutterNoise.volume.value = -8;
+
+      lockChime = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'sine' },
+        envelope: { attack: 0.02, decay: 0.3, sustain: 0.1, release: 0.4 }
+      }).toDestination();
+      lockChime.volume.value = -6;
+
+      await Tone.loaded();
+      audioReady = true;
+    }
+
+    async function setupFaceLandmarker() {
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+      );
+
+      faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numFaces: 2
+      });
+
+      status.textContent = "Model loaded. Starting camera...";
+      startWebcam();
+    }
+
+    async function startWebcam() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+          },
+          audio: false
+        });
+        video.srcObject = stream;
+
+        video.addEventListener('loadeddata', () => {
+          status.textContent = "Face the camera directly to begin scanning.";
+          captureButton.style.display = 'inline-block';
+          animationLoop();
+        });
+      } catch (error) {
+        status.textContent = "Camera access failed: " + error.message;
+      }
+    }
+
+    startButton.addEventListener('click', async () => {
+      startButton.disabled = true;
+      startButton.textContent = "Starting...";
+      try {
+        await setupAudio();
+      } catch (error) {
+        console.error("Audio setup failed, continuing without sound:", error);
+      }
+      status.textContent = "Loading tracking model...";
+      setupFaceLandmarker();
+      startButton.style.display = 'none';
+    });
+
+    captureButton.addEventListener('click', () => {
+      const captureCanvas = document.createElement('canvas');
+      captureCanvas.width = canvas.width;
+      captureCanvas.height = canvas.height;
+      const captureCtx = captureCanvas.getContext('2d');
+
+      captureCtx.translate(captureCanvas.width, 0);
+      captureCtx.scale(-1, 1);
+      captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+      captureCtx.drawImage(canvas, 0, 0);
+
+      captureCanvas.toBlob((blob) => {
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'face-scan-' + Date.now() + '.png';
+        link.click();
+      }, 'image/png');
+
+      triggerFlash();
+      if (shutterNoise) shutterNoise.triggerAttackRelease('16n');
+    });
+
+    function triggerFlash() {
+      flashOverlay.style.transition = 'opacity 0.05s ease';
+      flashOverlay.style.opacity = '0.9';
+      setTimeout(() => {
+        flashOverlay.style.transition = 'opacity 0.4s ease';
+        flashOverlay.style.opacity = '0';
+      }, 60);
+    }
+
+    function spawnBurst(x, y, count, colorCore) {
+      for (let i = 0; i < count; i++) {
+        const angle = (Math.PI * 2 * i) / count + Math.random() * 0.3;
+        const speed = Math.random() * 5 + 2;
+        burstParticles.push({
+          x, y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          alpha: 1,
+          radius: Math.random() * 3 + 2,
+          color: colorCore
+        });
+      }
+    }
+
+    function drawBurstParticles() {
+      burstParticles.forEach((p) => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.alpha -= 0.02;
+        ctx.fillStyle = p.color.replace('ALPHA', Math.max(0, p.alpha).toFixed(2));
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      burstParticles = burstParticles.filter((p) => p.alpha > 0);
+    }
+
+    function drawUnmirroredText(text, x, y, color, fontSize, align) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(-1, 1);
+      ctx.fillStyle = color;
+      ctx.font = fontSize + 'px monospace';
+      ctx.textAlign = align || 'center';
+      ctx.fillText(text, 0, 0);
+      ctx.restore();
+    }
+
+    function drawConnectedPoints(points, landmarks, color) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      points.forEach((index, i) => {
+        const point = landmarks[index];
+        const x = point.x * canvas.width;
+        const y = point.y * canvas.height;
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      });
+      ctx.stroke();
+    }
+
+    function getBoundingBox(landmarks) {
+      let minX = 1, minY = 1, maxX = 0, maxY = 0;
+      landmarks.forEach((point) => {
+        if (point.x < minX) minX = point.x;
+        if (point.x > maxX) maxX = point.x;
+        if (point.y < minY) minY = point.y;
+        if (point.y > maxY) maxY = point.y;
+      });
+      return {
+        x: minX * canvas.width,
+        y: minY * canvas.height,
+        width: (maxX - minX) * canvas.width,
+        height: (maxY - minY) * canvas.height
+      };
+    }
+
+    function drawScanBox(box, color) {
+      ctx.strokeStyle = '#7fffd4';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(box.x, box.y, box.width, box.height);
+
+      const cornerSize = 15;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 3;
+
+      ctx.beginPath();
+      ctx.moveTo(box.x, box.y + cornerSize);
+      ctx.lineTo(box.x, box.y);
+      ctx.lineTo(box.x + cornerSize, box.y);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(box.x + box.width - cornerSize, box.y);
+      ctx.lineTo(box.x + box.width, box.y);
+      ctx.lineTo(box.x + box.width, box.y + cornerSize);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(box.x, box.y + box.height - cornerSize);
+      ctx.lineTo(box.x, box.y + box.height);
+      ctx.lineTo(box.x + cornerSize, box.y + box.height);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(box.x + box.width - cornerSize, box.y + box.height);
+      ctx.lineTo(box.x + box.width, box.y + box.height);
+      ctx.lineTo(box.x + box.width, box.y + box.height - cornerSize);
+      ctx.stroke();
+    }
+
+    function drawScanLine(box) {
+      scanLineProgress += 0.012;
+      if (scanLineProgress > 1) scanLineProgress = 0;
+
+      const lineY = box.y + box.height * scanLineProgress;
+      const gradient = ctx.createLinearGradient(box.x, lineY, box.x + box.width, lineY);
+      gradient.addColorStop(0, 'rgba(127, 255, 212, 0)');
+      gradient.addColorStop(0.5, 'rgba(127, 255, 212, 0.9)');
+      gradient.addColorStop(1, 'rgba(127, 255, 212, 0)');
+
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(box.x, lineY);
+      ctx.lineTo(box.x + box.width, lineY);
+      ctx.stroke();
+    }
+
+    // simple smile heuristic: mouth width relative to the distance between the outer
+    // eye corners, this ratio grows noticeably when someone smiles wide
+    function getSmileRatio(face) {
+      const mouthLeft = face[61];
+      const mouthRight = face[291];
+      const eyeLeft = face[33];
+      const eyeRight = face[263];
+
+      const mouthWidth = Math.hypot(mouthRight.x - mouthLeft.x, mouthRight.y - mouthLeft.y);
+      const eyeDistance = Math.hypot(eyeRight.x - eyeLeft.x, eyeRight.y - eyeLeft.y);
+
+      return mouthWidth / eyeDistance;
+    }
+
+    function drawLockRing(box, progress) {
+      const centerX = box.x + box.width / 2;
+      const centerY = box.y + box.height / 2;
+      const radius = Math.max(box.width, box.height) * 0.7;
+
+      ctx.strokeStyle = 'rgba(255, 230, 77, 0.9)';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+      ctx.stroke();
+    }
+
+    function updateFaceSlot(slot, face, box, now) {
+      const smileRatio = getSmileRatio(face);
+      const isSmiling = smileRatio > SMILE_RATIO_THRESHOLD;
+
+      if (!wasFacePresent[slot]) {
+        if (scanBeep) scanBeep.triggerAttackRelease('G5', '16n');
+      }
+      wasFacePresent[slot] = true;
+
+      drawScanBox(box, isLocked[slot] ? '#ffe64d' : '#ff2fb0');
+      drawScanLine(box);
+      drawConnectedPoints(FACE_OUTLINE, face, 'rgba(255, 47, 176, 0.5)');
+      drawConnectedPoints(LEFT_EYE, face, 'rgba(127, 255, 212, 0.8)');
+      drawConnectedPoints(RIGHT_EYE, face, 'rgba(127, 255, 212, 0.8)');
+      drawConnectedPoints(LIPS, face, 'rgba(127, 255, 212, 0.8)');
+
+      // lock-on progress, only accumulates while a face is present
+      if (!isLocked[slot]) {
+        lockProgress[slot] = Math.min(1, lockProgress[slot] + (16 / LOCK_HOLD_MS));
+        drawLockRing(box, lockProgress[slot]);
+
+        if (lockProgress[slot] >= 1) {
+          isLocked[slot] = true;
+          triggerFlash();
+          spawnBurst(box.x + box.width / 2, box.y + box.height / 2, 40, 'rgba(255, 230, 77, ALPHA)');
+          if (lockChime) lockChime.triggerAttackRelease(['C5', 'E5', 'G5'], '4n');
+        }
+      }
+
+      let readoutText;
+      let readoutColor;
+
+      if (isLocked[slot]) {
+        readoutText = 'ANALYSIS COMPLETE';
+        readoutColor = 'rgba(255, 230, 77, 0.95)';
+      } else if (isSmiling) {
+        readoutText = 'EXPRESSION: JOY DETECTED';
+        readoutColor = 'rgba(255, 230, 77, 0.95)';
+      } else {
+        if (now - lastReadoutSwitch[slot] > READOUT_INTERVAL_MS) {
+          readoutIndex[slot] = (readoutIndex[slot] + 1) % READOUTS.length;
+          lastReadoutSwitch[slot] = now;
+        }
+        readoutText = READOUTS[readoutIndex[slot]];
+        readoutColor = 'rgba(127, 255, 212, 0.9)';
+      }
+
+      drawUnmirroredText(
+        readoutText,
+        box.x,
+        box.y - canvas.height * 0.02,
+        readoutColor,
+        canvas.width * 0.018,
+        'left'
+      );
+
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    }
+
+    function resetFaceSlot(slot) {
+      lockProgress[slot] = 0;
+      isLocked[slot] = false;
+      wasFacePresent[slot] = false;
+    }
+
+    function drawSyncLine(centerA, centerB, time) {
+      ctx.strokeStyle = 'rgba(255, 47, 176, 0.6)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(centerA.x, centerA.y);
+      ctx.lineTo(centerB.x, centerB.y);
+      ctx.stroke();
+
+      const midX = (centerA.x + centerB.x) / 2;
+      const midY = (centerA.y + centerB.y) / 2;
+
+      // fake sync percentage, gently fluctuating with a sine wave so it feels alive
+      // without jumping around erratically frame to frame
+      const syncValue = 82 + Math.sin(time / 800) * 12;
+
+      drawUnmirroredText(
+        'SYNC RATE: ' + syncValue.toFixed(1) + '%',
+        midX,
+        midY - 20,
+        'rgba(255, 47, 176, 0.95)',
+        canvas.width * 0.02,
+        'center'
+      );
+    }
+
+    function drawIdleRing(time) {
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+
+      for (let i = 0; i < 3; i++) {
+        const pulse = (time / 1000 + i * 0.6) % 2;
+        const radius = pulse * 100;
+        const alpha = Math.max(0, 1 - pulse / 2);
+        ctx.strokeStyle = `rgba(255, 47, 176, ${alpha * 0.5})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      drawUnmirroredText('AWAITING FACE', centerX, centerY + 130, 'rgba(127, 255, 212, 0.8)', canvas.width * 0.02);
+    }
+
+    function animationLoop() {
+      const now = performance.now();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (faceLandmarker && video.readyState >= 2) {
+        try {
+          const results = faceLandmarker.detectForVideo(video, now);
+          const faces = results.faceLandmarks || [];
+
+          if (faces.length === 0) {
+            drawIdleRing(now);
+            resetFaceSlot(0);
+            resetFaceSlot(1);
+          } else {
+            const centers = [];
+
+            faces.forEach((face, index) => {
+              if (index > 1) return;
+              const box = getBoundingBox(face);
+              const center = updateFaceSlot(index, face, box, now);
+              centers.push(center);
+            });
+
+            // reset whichever slot has no face this frame
+            if (faces.length < 2) resetFaceSlot(1);
+
+            if (centers.length === 2) {
+              drawSyncLine(centers[0], centers[1], now);
+            }
+          }
+        } catch (error) {
+          console.error("Detection error:", error);
+        }
+      }
+
+      drawBurstParticles();
+
+      requestAnimationFrame(animationLoop);
+    }
+  </script>
+
+</body>
+</html>
