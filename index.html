@@ -67,6 +67,7 @@
       width: 100%;
       height: 100%;
       transform: scaleX(-1);
+      opacity: 0.5;
     }
 
     canvas {
@@ -126,42 +127,34 @@
 
     let faceLandmarker;
     let audioReady = false;
-    let scanBeep, shutterNoise, lockChime;
-
-    const LOCK_HOLD_MS = 2000;
-    const SMILE_RATIO_THRESHOLD = 0.95;
-
-    const READOUTS = [
-      'IDENTITY: UNKNOWN',
-      'NEURAL PATTERN: STABLE',
-      'THREAT LEVEL: MINIMAL',
-      'AURA COLOR: NEON PINK',
-      'STATUS: HUMAN CONFIRMED',
-      'ANOMALY DETECTED: NONE',
-      'CLEARANCE: GRANTED',
-      'BIOSIGNATURE: NOMINAL'
-    ];
+    let scanBeep, shutterNoise, identityChime;
 
     const FACE_OUTLINE = [
       10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
       397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
       172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109, 10
     ];
-    const LEFT_EYE = [33, 160, 158, 133, 153, 144, 33];
-    const RIGHT_EYE = [362, 385, 387, 263, 373, 380, 362];
-    const LIPS = [61, 39, 0, 269, 291, 405, 17, 181, 61];
 
-    let scanLineProgress = 0;
+    const TITLES = ['GHOST', 'NEON', 'VOID', 'PHANTOM', 'CRIMSON', 'CHROME', 'SILENT', 'ROGUE', 'ECHO', 'LUNAR', 'CYBER', 'FROST'];
+    const NAMES = ['ORACLE', 'WANDERER', 'DRIFTER', 'REAPER', 'WEAVER', 'SPECTER', 'SENTINEL', 'NOMAD', 'MIRAGE', 'HARBINGER', 'CIPHER', 'WRAITH'];
+    const CLASSES = ['SIGNAL BREAKER', 'NIGHT RUNNER', 'DATA GHOST', 'STAR CHASER', 'VOID WALKER', 'GLITCH SAINT', 'NEON PROPHET', 'SHADOW PILOT'];
+
+    let wasFacePresent = [false, false];
+    let identity = [null, null];
+    let motes = [[], []];
     let burstParticles = [];
 
-    // per-face-slot state, index 0 and 1 correspond to whichever faces MediaPipe
-    // returns first and second in a given frame
-    let lockProgress = [0, 0];
-    let isLocked = [false, false];
-    let wasFacePresent = [false, false];
-    let readoutIndex = [0, 0];
-    let lastReadoutSwitch = [0, 0];
-    const READOUT_INTERVAL_MS = 2200;
+    const HUE_BASE = [320, 170];
+
+    function generateIdentity() {
+      const title = TITLES[Math.floor(Math.random() * TITLES.length)];
+      const name = NAMES[Math.floor(Math.random() * NAMES.length)];
+      const cls = CLASSES[Math.floor(Math.random() * CLASSES.length)];
+      return {
+        line1: title + ' ' + name,
+        line2: cls
+      };
+    }
 
     async function setupAudio() {
       await Tone.start();
@@ -178,11 +171,11 @@
       }).toDestination();
       shutterNoise.volume.value = -8;
 
-      lockChime = new Tone.PolySynth(Tone.Synth, {
+      identityChime = new Tone.PolySynth(Tone.Synth, {
         oscillator: { type: 'sine' },
-        envelope: { attack: 0.02, decay: 0.3, sustain: 0.1, release: 0.4 }
+        envelope: { attack: 0.02, decay: 0.3, sustain: 0.15, release: 0.6 }
       }).toDestination();
-      lockChime.volume.value = -6;
+      identityChime.volume.value = -4;
 
       await Tone.loaded();
       audioReady = true;
@@ -219,7 +212,7 @@
         video.srcObject = stream;
 
         video.addEventListener('loadeddata', () => {
-          status.textContent = "Face the camera directly to begin scanning.";
+          status.textContent = "Face the camera directly to reveal your alter ego.";
           captureButton.style.display = 'inline-block';
           animationLoop();
         });
@@ -255,34 +248,34 @@
       captureCanvas.toBlob((blob) => {
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        link.download = 'face-scan-' + Date.now() + '.png';
+        link.download = 'alter-ego-' + Date.now() + '.png';
         link.click();
       }, 'image/png');
 
-      triggerFlash();
+      triggerFlash(0.9);
       if (shutterNoise) shutterNoise.triggerAttackRelease('16n');
     });
 
-    function triggerFlash() {
+    function triggerFlash(strength) {
       flashOverlay.style.transition = 'opacity 0.05s ease';
-      flashOverlay.style.opacity = '0.9';
+      flashOverlay.style.opacity = String(strength);
       setTimeout(() => {
-        flashOverlay.style.transition = 'opacity 0.4s ease';
+        flashOverlay.style.transition = 'opacity 0.5s ease';
         flashOverlay.style.opacity = '0';
       }, 60);
     }
 
-    function spawnBurst(x, y, count, colorCore) {
+    function spawnBurst(x, y, count, hue) {
       for (let i = 0; i < count; i++) {
         const angle = (Math.PI * 2 * i) / count + Math.random() * 0.3;
-        const speed = Math.random() * 5 + 2;
+        const speed = Math.random() * 7 + 3;
         burstParticles.push({
           x, y,
           vx: Math.cos(angle) * speed,
           vy: Math.sin(angle) * speed,
           alpha: 1,
-          radius: Math.random() * 3 + 2,
-          color: colorCore
+          radius: Math.random() * 4 + 2,
+          hue
         });
       }
     }
@@ -290,9 +283,11 @@
     function drawBurstParticles() {
       burstParticles.forEach((p) => {
         p.x += p.vx;
+        p.vx *= 0.96;
         p.y += p.vy;
+        p.vy *= 0.96;
         p.alpha -= 0.02;
-        ctx.fillStyle = p.color.replace('ALPHA', Math.max(0, p.alpha).toFixed(2));
+        ctx.fillStyle = `hsla(${p.hue}, 100%, 70%, ${Math.max(0, p.alpha)})`;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
         ctx.fill();
@@ -311,23 +306,6 @@
       ctx.restore();
     }
 
-    function drawConnectedPoints(points, landmarks, color) {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      points.forEach((index, i) => {
-        const point = landmarks[index];
-        const x = point.x * canvas.width;
-        const y = point.y * canvas.height;
-        if (i === 0) {
-          ctx.moveTo(x, y);
-        } else {
-          ctx.lineTo(x, y);
-        }
-      });
-      ctx.stroke();
-    }
-
     function getBoundingBox(landmarks) {
       let minX = 1, minY = 1, maxX = 0, maxY = 0;
       landmarks.forEach((point) => {
@@ -344,190 +322,147 @@
       };
     }
 
-    function drawScanBox(box, color) {
-      ctx.strokeStyle = '#7fffd4';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(box.x, box.y, box.width, box.height);
+    function drawAura(face, hueOffset, time) {
+      const hue = (HUE_BASE[hueOffset] + Math.sin(time / 3000) * 20 + 360) % 360;
+      const pulse = Math.sin(time / 500) * 0.15 + 1;
 
-      const cornerSize = 15;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 3;
+      const points = FACE_OUTLINE.map((index) => ({
+        x: face[index].x * canvas.width,
+        y: face[index].y * canvas.height
+      }));
 
-      ctx.beginPath();
-      ctx.moveTo(box.x, box.y + cornerSize);
-      ctx.lineTo(box.x, box.y);
-      ctx.lineTo(box.x + cornerSize, box.y);
-      ctx.stroke();
+      const passes = [
+        { width: 26 * pulse, alpha: 0.18 },
+        { width: 14 * pulse, alpha: 0.35 },
+        { width: 5, alpha: 0.6 },
+        { width: 2, alpha: 1 }
+      ];
 
-      ctx.beginPath();
-      ctx.moveTo(box.x + box.width - cornerSize, box.y);
-      ctx.lineTo(box.x + box.width, box.y);
-      ctx.lineTo(box.x + box.width, box.y + cornerSize);
-      ctx.stroke();
+      passes.forEach((pass) => {
+        ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${pass.alpha})`;
+        ctx.lineWidth = pass.width;
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        points.forEach((p, i) => {
+          if (i === 0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        });
+        ctx.stroke();
+      });
 
-      ctx.beginPath();
-      ctx.moveTo(box.x, box.y + box.height - cornerSize);
-      ctx.lineTo(box.x, box.y + box.height);
-      ctx.lineTo(box.x + cornerSize, box.y + box.height);
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.moveTo(box.x + box.width - cornerSize, box.y + box.height);
-      ctx.lineTo(box.x + box.width, box.y + box.height);
-      ctx.lineTo(box.x + box.width, box.y + box.height - cornerSize);
-      ctx.stroke();
+      return hue;
     }
 
-    function drawScanLine(box) {
-      scanLineProgress += 0.012;
-      if (scanLineProgress > 1) scanLineProgress = 0;
+    function spawnMotes(slot, box, hue) {
+      for (let i = 0; i < 2; i++) {
+        if (Math.random() < 0.7) {
+          const angle = Math.random() * Math.PI * 2;
+          const edgeX = box.x + box.width / 2 + Math.cos(angle) * (box.width / 2);
+          const edgeY = box.y + box.height / 2 + Math.sin(angle) * (box.height / 2);
 
-      const lineY = box.y + box.height * scanLineProgress;
-      const gradient = ctx.createLinearGradient(box.x, lineY, box.x + box.width, lineY);
-      gradient.addColorStop(0, 'rgba(127, 255, 212, 0)');
-      gradient.addColorStop(0.5, 'rgba(127, 255, 212, 0.9)');
-      gradient.addColorStop(1, 'rgba(127, 255, 212, 0)');
+          motes[slot].push({
+            x: edgeX,
+            y: edgeY,
+            vx: Math.cos(angle) * 0.8,
+            vy: Math.sin(angle) * 0.8 - 0.5,
+            alpha: 0.9,
+            radius: Math.random() * 3 + 1.5,
+            hue
+          });
+        }
+      }
+    }
 
-      ctx.strokeStyle = gradient;
-      ctx.lineWidth = 2;
+    function drawMotes(slot) {
+      motes[slot].forEach((m) => {
+        m.x += m.vx;
+        m.y += m.vy;
+        m.alpha -= 0.007;
+        ctx.fillStyle = `hsla(${m.hue}, 100%, 75%, ${Math.max(0, m.alpha)})`;
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, m.radius, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      motes[slot] = motes[slot].filter((m) => m.alpha > 0);
+    }
+
+    function drawIdentityCard(box, hue, identityData) {
+      const cardX = box.x;
+      const cardY = box.y - canvas.height * 0.11;
+      const cardWidth = box.width * 0.95;
+      const cardHeight = canvas.height * 0.09;
+
+      ctx.save();
+      ctx.translate(cardX, cardY);
+      ctx.scale(-1, 1);
+
+      ctx.fillStyle = `hsla(${hue}, 60%, 15%, 0.65)`;
+      ctx.strokeStyle = `hsla(${hue}, 100%, 65%, 0.9)`;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(box.x, lineY);
-      ctx.lineTo(box.x + box.width, lineY);
+      ctx.rect(-cardWidth, -cardHeight, cardWidth, cardHeight);
+      ctx.fill();
       ctx.stroke();
+
+      ctx.fillStyle = `hsla(${hue}, 100%, 78%, 1)`;
+      ctx.font = (canvas.width * 0.022) + 'px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(identityData.line1, -cardWidth * 0.06, -cardHeight * 0.55);
+
+      ctx.fillStyle = `hsla(${hue}, 100%, 78%, 0.75)`;
+      ctx.font = (canvas.width * 0.015) + 'px monospace';
+      ctx.fillText(identityData.line2, -cardWidth * 0.06, -cardHeight * 0.15);
+
+      ctx.restore();
     }
 
-    // simple smile heuristic: mouth width relative to the distance between the outer
-    // eye corners, this ratio grows noticeably when someone smiles wide
-    function getSmileRatio(face) {
-      const mouthLeft = face[61];
-      const mouthRight = face[291];
-      const eyeLeft = face[33];
-      const eyeRight = face[263];
-
-      const mouthWidth = Math.hypot(mouthRight.x - mouthLeft.x, mouthRight.y - mouthLeft.y);
-      const eyeDistance = Math.hypot(eyeRight.x - eyeLeft.x, eyeRight.y - eyeLeft.y);
-
-      return mouthWidth / eyeDistance;
-    }
-
-    function drawLockRing(box, progress) {
-      const centerX = box.x + box.width / 2;
-      const centerY = box.y + box.height / 2;
-      const radius = Math.max(box.width, box.height) * 0.7;
-
-      ctx.strokeStyle = 'rgba(255, 230, 77, 0.9)';
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, radius, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
-      ctx.stroke();
-    }
-
-    function updateFaceSlot(slot, face, box, now) {
-      const smileRatio = getSmileRatio(face);
-      const isSmiling = smileRatio > SMILE_RATIO_THRESHOLD;
+    function updateFaceSlot(slot, face, now) {
+      const box = getBoundingBox(face);
 
       if (!wasFacePresent[slot]) {
+        identity[slot] = generateIdentity();
+        const revealHue = HUE_BASE[slot];
+        const centerX = box.x + box.width / 2;
+        const centerY = box.y + box.height / 2;
+
+        spawnBurst(centerX, centerY, 45, revealHue);
+        triggerFlash(0.5);
         if (scanBeep) scanBeep.triggerAttackRelease('G5', '16n');
+        if (identityChime) {
+          identityChime.triggerAttackRelease(['C5', 'E5', 'G5', 'C6'], '4n');
+        }
       }
       wasFacePresent[slot] = true;
 
-      drawScanBox(box, isLocked[slot] ? '#ffe64d' : '#ff2fb0');
-      drawScanLine(box);
-      drawConnectedPoints(FACE_OUTLINE, face, 'rgba(255, 47, 176, 0.5)');
-      drawConnectedPoints(LEFT_EYE, face, 'rgba(127, 255, 212, 0.8)');
-      drawConnectedPoints(RIGHT_EYE, face, 'rgba(127, 255, 212, 0.8)');
-      drawConnectedPoints(LIPS, face, 'rgba(127, 255, 212, 0.8)');
+      const hue = drawAura(face, slot, now);
+      spawnMotes(slot, box, hue);
+      drawMotes(slot);
+      drawBurstParticles();
 
-      // lock-on progress, only accumulates while a face is present
-      if (!isLocked[slot]) {
-        lockProgress[slot] = Math.min(1, lockProgress[slot] + (16 / LOCK_HOLD_MS));
-        drawLockRing(box, lockProgress[slot]);
-
-        if (lockProgress[slot] >= 1) {
-          isLocked[slot] = true;
-          triggerFlash();
-          spawnBurst(box.x + box.width / 2, box.y + box.height / 2, 40, 'rgba(255, 230, 77, ALPHA)');
-          if (lockChime) lockChime.triggerAttackRelease(['C5', 'E5', 'G5'], '4n');
-        }
+      if (identity[slot]) {
+        drawIdentityCard(box, hue, identity[slot]);
       }
-
-      let readoutText;
-      let readoutColor;
-
-      if (isLocked[slot]) {
-        readoutText = 'ANALYSIS COMPLETE';
-        readoutColor = 'rgba(255, 230, 77, 0.95)';
-      } else if (isSmiling) {
-        readoutText = 'EXPRESSION: JOY DETECTED';
-        readoutColor = 'rgba(255, 230, 77, 0.95)';
-      } else {
-        if (now - lastReadoutSwitch[slot] > READOUT_INTERVAL_MS) {
-          readoutIndex[slot] = (readoutIndex[slot] + 1) % READOUTS.length;
-          lastReadoutSwitch[slot] = now;
-        }
-        readoutText = READOUTS[readoutIndex[slot]];
-        readoutColor = 'rgba(127, 255, 212, 0.9)';
-      }
-
-      drawUnmirroredText(
-        readoutText,
-        box.x,
-        box.y - canvas.height * 0.02,
-        readoutColor,
-        canvas.width * 0.018,
-        'left'
-      );
-
-      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
     }
 
     function resetFaceSlot(slot) {
-      lockProgress[slot] = 0;
-      isLocked[slot] = false;
       wasFacePresent[slot] = false;
+      identity[slot] = null;
     }
 
-    function drawSyncLine(centerA, centerB, time) {
-      ctx.strokeStyle = 'rgba(255, 47, 176, 0.6)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(centerA.x, centerA.y);
-      ctx.lineTo(centerB.x, centerB.y);
-      ctx.stroke();
-
-      const midX = (centerA.x + centerB.x) / 2;
-      const midY = (centerA.y + centerB.y) / 2;
-
-      // fake sync percentage, gently fluctuating with a sine wave so it feels alive
-      // without jumping around erratically frame to frame
-      const syncValue = 82 + Math.sin(time / 800) * 12;
-
-      drawUnmirroredText(
-        'SYNC RATE: ' + syncValue.toFixed(1) + '%',
-        midX,
-        midY - 20,
-        'rgba(255, 47, 176, 0.95)',
-        canvas.width * 0.02,
-        'center'
-      );
-    }
-
-    function drawIdleRing(time) {
+    function drawIdleGlow(time) {
       const centerX = canvas.width / 2;
       const centerY = canvas.height / 2;
+      const pulse = Math.sin(time / 800) * 0.3 + 0.7;
 
-      for (let i = 0; i < 3; i++) {
-        const pulse = (time / 1000 + i * 0.6) % 2;
-        const radius = pulse * 100;
-        const alpha = Math.max(0, 1 - pulse / 2);
-        ctx.strokeStyle = `rgba(255, 47, 176, ${alpha * 0.5})`;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
-        ctx.stroke();
-      }
+      const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, 150);
+      gradient.addColorStop(0, `rgba(127, 255, 212, ${0.3 * pulse})`);
+      gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, 150, 0, Math.PI * 2);
+      ctx.fill();
 
-      drawUnmirroredText('AWAITING FACE', centerX, centerY + 130, 'rgba(127, 255, 212, 0.8)', canvas.width * 0.02);
+      drawUnmirroredText('STEP INTO FRAME', centerX, centerY + 170, 'rgba(127, 255, 212, 0.85)', canvas.width * 0.022);
     }
 
     function animationLoop() {
@@ -540,32 +475,21 @@
           const faces = results.faceLandmarks || [];
 
           if (faces.length === 0) {
-            drawIdleRing(now);
+            drawIdleGlow(now);
             resetFaceSlot(0);
             resetFaceSlot(1);
+            drawBurstParticles();
           } else {
-            const centers = [];
-
             faces.forEach((face, index) => {
               if (index > 1) return;
-              const box = getBoundingBox(face);
-              const center = updateFaceSlot(index, face, box, now);
-              centers.push(center);
+              updateFaceSlot(index, face, now);
             });
-
-            // reset whichever slot has no face this frame
             if (faces.length < 2) resetFaceSlot(1);
-
-            if (centers.length === 2) {
-              drawSyncLine(centers[0], centers[1], now);
-            }
           }
         } catch (error) {
           console.error("Detection error:", error);
         }
       }
-
-      drawBurstParticles();
 
       requestAnimationFrame(animationLoop);
     }
