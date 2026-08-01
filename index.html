@@ -127,56 +127,60 @@
 
     let faceLandmarker;
     let audioReady = false;
-    let scanBeep, shutterNoise, identityChime;
+    let chargeSynth, releaseSynth, releaseNoise, releaseBoom, shutterNoise;
 
-    // hand-curated pairs, name plus a matching poetic line, written together
-    // on purpose so nothing ever feels like a mismatched random pairing
-    const IDENTITIES = [
-      { name: 'ECHO WRAITH', line: 'you move like static before the signal clears' },
-      { name: 'NEON ORACLE', line: 'you already know how this ends' },
-      { name: 'VOID DRIFTER', line: 'gravity is a suggestion where you walk' },
-      { name: 'CRIMSON SENTINEL', line: 'something is always watching back' },
-      { name: 'CHROME NOMAD', line: 'home is wherever the light bends next' },
-      { name: 'SILENT HARBINGER', line: 'the quiet before you is not an accident' },
-      { name: 'GLITCH SAINT', line: 'even your mistakes look intentional' },
-      { name: 'LUNAR REAPER', line: 'you collect endings the way others collect starts' },
-      { name: 'PHANTOM CIPHER', line: 'no one has ever fully decoded you' },
-      { name: 'FROST SPECTER', line: 'you leave a chill in rooms you have already left' },
-      { name: 'RUST PROPHET', line: 'you saw this coming before the wiring did' },
-      { name: 'HOLLOW MIRAGE', line: 'not everyone who sees you believes you' }
-    ];
-
-    let wasFacePresent = [false, false];
-    let identity = [null, null];
-    let motes = [[], []];
-    let burstParticles = [];
+    // mouth openness (scaled by face size) mapped directly to charge, 0 to 1
+    const MOUTH_OPEN_MIN = 0.045;
+    const MOUTH_OPEN_MAX = 0.16;
+    const REARM_THRESHOLD = 0.12; // mouth must close back down below this to trigger again
 
     const HUE_BASE = [320, 170];
 
-    function pickIdentity() {
-      return IDENTITIES[Math.floor(Math.random() * IDENTITIES.length)];
+    let wasFacePresent = [false, false];
+    let charge = [0, 0];
+    let armed = [true, true];
+    let motes = [[], []];
+    let burstParticles = [];
+    let shockwaves = [];
+
+    function mapRange(value, inMin, inMax, outMin, outMax) {
+      const t = Math.max(0, Math.min(1, (value - inMin) / (inMax - inMin)));
+      return outMin + t * (outMax - outMin);
     }
 
     async function setupAudio() {
       await Tone.start();
 
-      scanBeep = new Tone.Synth({
+      chargeSynth = new Tone.Synth({
         oscillator: { type: 'sine' },
-        envelope: { attack: 0.01, decay: 0.1, sustain: 0, release: 0.1 }
+        envelope: { attack: 0.05, decay: 0.1, sustain: 0.6, release: 0.1 }
       }).toDestination();
-      scanBeep.volume.value = -10;
+      chargeSynth.volume.value = -18;
+
+      releaseSynth = new Tone.Synth({
+        oscillator: { type: 'sawtooth' },
+        envelope: { attack: 0.001, decay: 0.5, sustain: 0, release: 0.3 }
+      }).toDestination();
+      releaseSynth.volume.value = -4;
+
+      releaseNoise = new Tone.NoiseSynth({
+        noise: { type: 'brown' },
+        envelope: { attack: 0.001, decay: 0.4, sustain: 0 }
+      }).toDestination();
+      releaseNoise.volume.value = -6;
+
+      releaseBoom = new Tone.MembraneSynth({
+        pitchDecay: 0.1,
+        octaves: 6,
+        envelope: { attack: 0.001, decay: 0.5, sustain: 0 }
+      }).toDestination();
+      releaseBoom.volume.value = -2;
 
       shutterNoise = new Tone.NoiseSynth({
         noise: { type: 'white' },
         envelope: { attack: 0.001, decay: 0.05, sustain: 0 }
       }).toDestination();
       shutterNoise.volume.value = -8;
-
-      identityChime = new Tone.PolySynth(Tone.Synth, {
-        oscillator: { type: 'sine' },
-        envelope: { attack: 0.02, decay: 0.3, sustain: 0.15, release: 0.6 }
-      }).toDestination();
-      identityChime.volume.value = -4;
 
       await Tone.loaded();
       audioReady = true;
@@ -213,7 +217,7 @@
         video.srcObject = stream;
 
         video.addEventListener('loadeddata', () => {
-          status.textContent = "Face the camera directly to reveal your alter ego.";
+          status.textContent = "Open your mouth wide to charge and release.";
           captureButton.style.display = 'inline-block';
           animationLoop();
         });
@@ -249,7 +253,7 @@
       captureCanvas.toBlob((blob) => {
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
-        link.download = 'alter-ego-' + Date.now() + '.png';
+        link.download = 'face-scan-' + Date.now() + '.png';
         link.click();
       }, 'image/png');
 
@@ -269,7 +273,7 @@
     function spawnBurst(x, y, count, hue) {
       for (let i = 0; i < count; i++) {
         const angle = (Math.PI * 2 * i) / count + Math.random() * 0.3;
-        const speed = Math.random() * 7 + 3;
+        const speed = Math.random() * 9 + 4;
         burstParticles.push({
           x, y,
           vx: Math.cos(angle) * speed,
@@ -284,16 +288,33 @@
     function drawBurstParticles() {
       burstParticles.forEach((p) => {
         p.x += p.vx;
-        p.vx *= 0.96;
+        p.vx *= 0.95;
         p.y += p.vy;
-        p.vy *= 0.96;
-        p.alpha -= 0.02;
+        p.vy *= 0.95;
+        p.alpha -= 0.018;
         ctx.fillStyle = `hsla(${p.hue}, 100%, 70%, ${Math.max(0, p.alpha)})`;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
         ctx.fill();
       });
       burstParticles = burstParticles.filter((p) => p.alpha > 0);
+    }
+
+    function spawnShockwave(x, y, hue) {
+      shockwaves.push({ x, y, radius: 10, alpha: 1, hue });
+    }
+
+    function drawShockwaves() {
+      shockwaves.forEach((s) => {
+        s.radius += 14;
+        s.alpha -= 0.025;
+        ctx.strokeStyle = `hsla(${s.hue}, 100%, 70%, ${Math.max(0, s.alpha)})`;
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+      shockwaves = shockwaves.filter((s) => s.alpha > 0);
     }
 
     function drawUnmirroredText(text, x, y, color, fontSize, align) {
@@ -323,46 +344,58 @@
       };
     }
 
-    // ambient pool of light centered on the face, no contour tracing at all,
-    // just a soft glow that breathes gently, like standing in colored light
-    function drawAmbientHalo(box, hueOffset, time) {
-      const hue = (HUE_BASE[hueOffset] + Math.sin(time / 4000) * 25 + 360) % 360;
-      const pulse = Math.sin(time / 900) * 0.15 + 1;
-      const centerX = box.x + box.width / 2;
-      const centerY = box.y + box.height / 2;
-      const baseRadius = Math.max(box.width, box.height) * 0.85 * pulse;
+    // mouth openness, scaled by face height so it reads consistently regardless
+    // of how close the face is to the camera
+    function getMouthOpenRatio(face) {
+      const upperLip = face[13];
+      const lowerLip = face[14];
+      const forehead = face[10];
+      const chin = face[152];
 
-      const gradient = ctx.createRadialGradient(centerX, centerY, baseRadius * 0.3, centerX, centerY, baseRadius);
-      gradient.addColorStop(0, `hsla(${hue}, 100%, 65%, 0.28)`);
-      gradient.addColorStop(0.6, `hsla(${hue}, 100%, 60%, 0.12)`);
-      gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      const mouthGap = Math.hypot(lowerLip.x - upperLip.x, lowerLip.y - upperLip.y);
+      const faceHeight = Math.hypot(chin.x - forehead.x, chin.y - forehead.y);
 
-      ctx.fillStyle = gradient;
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, baseRadius, 0, Math.PI * 2);
-      ctx.fill();
-
-      return hue;
+      return mouthGap / faceHeight;
     }
 
-    function spawnMotes(slot, box, hue) {
-      for (let i = 0; i < 2; i++) {
-        if (Math.random() < 0.6) {
-          const angle = Math.random() * Math.PI * 2;
-          const dist = Math.random() * box.width * 0.6;
-          const originX = box.x + box.width / 2 + Math.cos(angle) * dist;
-          const originY = box.y + box.height / 2 + Math.sin(angle) * dist;
+    function drawChargeRing(box, chargeAmount, hue) {
+      const centerX = box.x + box.width / 2;
+      const centerY = box.y + box.height / 2;
+      const baseRadius = Math.max(box.width, box.height) * 0.65;
+      const radius = baseRadius * (0.7 + chargeAmount * 0.5);
 
-          motes[slot].push({
-            x: originX,
-            y: originY,
-            vx: Math.cos(angle) * 0.5,
-            vy: Math.sin(angle) * 0.5 - 0.4,
-            alpha: 0.85,
-            radius: Math.random() * 2.5 + 1,
-            hue
-          });
-        }
+      const glowGradient = ctx.createRadialGradient(centerX, centerY, radius * 0.5, centerX, centerY, radius);
+      glowGradient.addColorStop(0, `hsla(${hue}, 100%, 65%, ${0.05 + chargeAmount * 0.25})`);
+      glowGradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = glowGradient;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = `hsla(${hue}, 100%, ${60 + chargeAmount * 20}%, ${0.3 + chargeAmount * 0.6})`;
+      ctx.lineWidth = 2 + chargeAmount * 5;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius, -Math.PI / 2, -Math.PI / 2 + chargeAmount * Math.PI * 2);
+      ctx.stroke();
+    }
+
+    function spawnMotes(slot, box, hue, intensity) {
+      const spawnChance = 0.3 + intensity * 0.6;
+      if (Math.random() < spawnChance) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = Math.random() * box.width * 0.5;
+        const originX = box.x + box.width / 2 + Math.cos(angle) * dist;
+        const originY = box.y + box.height / 2 + Math.sin(angle) * dist;
+
+        motes[slot].push({
+          x: originX,
+          y: originY,
+          vx: Math.cos(angle) * (0.5 + intensity * 1.5),
+          vy: Math.sin(angle) * (0.5 + intensity * 1.5) - 0.3,
+          alpha: 0.9,
+          radius: Math.random() * 2.5 + 1,
+          hue
+        });
       }
     }
 
@@ -370,7 +403,7 @@
       motes[slot].forEach((m) => {
         m.x += m.vx;
         m.y += m.vy;
-        m.alpha -= 0.007;
+        m.alpha -= 0.01;
         ctx.fillStyle = `hsla(${m.hue}, 100%, 78%, ${Math.max(0, m.alpha)})`;
         ctx.beginPath();
         ctx.arc(m.x, m.y, m.radius, 0, Math.PI * 2);
@@ -379,66 +412,56 @@
       motes[slot] = motes[slot].filter((m) => m.alpha > 0);
     }
 
-    function drawIdentityCard(box, hue, identityData) {
-      const cardX = box.x;
-      const cardY = box.y - canvas.height * 0.13;
-      const cardWidth = box.width * 1.05;
-      const cardHeight = canvas.height * 0.11;
-
-      ctx.save();
-      ctx.translate(cardX, cardY);
-      ctx.scale(-1, 1);
-
-      ctx.fillStyle = `hsla(${hue}, 60%, 14%, 0.7)`;
-      ctx.strokeStyle = `hsla(${hue}, 100%, 65%, 0.9)`;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.rect(-cardWidth, -cardHeight, cardWidth, cardHeight);
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.fillStyle = `hsla(${hue}, 100%, 80%, 1)`;
-      ctx.font = 'bold ' + (canvas.width * 0.022) + 'px monospace';
-      ctx.textAlign = 'right';
-      ctx.fillText(identityData.name, -cardWidth * 0.06, -cardHeight * 0.62);
-
-      ctx.fillStyle = `hsla(${hue}, 90%, 82%, 0.85)`;
-      ctx.font = 'italic ' + (canvas.width * 0.014) + 'px monospace';
-      ctx.fillText('"' + identityData.line + '"', -cardWidth * 0.06, -cardHeight * 0.2);
-
-      ctx.restore();
+    function playReleaseSound() {
+      const now = Tone.now();
+      if (releaseSynth) {
+        releaseSynth.triggerAttack('A2', now);
+        releaseSynth.frequency.exponentialRampToValueAtTime(880, now + 0.15);
+        releaseSynth.triggerRelease(now + 0.3);
+      }
+      if (releaseNoise) releaseNoise.triggerAttackRelease('8n');
+      if (releaseBoom) releaseBoom.triggerAttackRelease('C1', '4n');
     }
 
     function updateFaceSlot(slot, face, now) {
       const box = getBoundingBox(face);
+      const hue = HUE_BASE[slot];
 
       if (!wasFacePresent[slot]) {
-        identity[slot] = pickIdentity();
-        const centerX = box.x + box.width / 2;
-        const centerY = box.y + box.height / 2;
-
-        spawnBurst(centerX, centerY, 45, HUE_BASE[slot]);
-        triggerFlash(0.5);
-        if (scanBeep) scanBeep.triggerAttackRelease('G5', '16n');
-        if (identityChime) {
-          identityChime.triggerAttackRelease(['C5', 'E5', 'G5', 'C6'], '4n');
-        }
+        charge[slot] = 0;
+        armed[slot] = true;
       }
       wasFacePresent[slot] = true;
 
-      const hue = drawAmbientHalo(box, slot, now);
-      spawnMotes(slot, box, hue);
-      drawMotes(slot);
-      drawBurstParticles();
+      const mouthRatio = getMouthOpenRatio(face);
+      const targetCharge = mapRange(mouthRatio, MOUTH_OPEN_MIN, MOUTH_OPEN_MAX, 0, 1);
+      // smooth the charge value slightly so it doesn't flicker on frame-to-frame jitter
+      charge[slot] += (targetCharge - charge[slot]) * 0.35;
 
-      if (identity[slot]) {
-        drawIdentityCard(box, hue, identity[slot]);
+      const centerX = box.x + box.width / 2;
+      const centerY = box.y + box.height / 2;
+
+      if (armed[slot] && charge[slot] >= 0.97) {
+        armed[slot] = false;
+        spawnShockwave(centerX, centerY, hue);
+        spawnBurst(centerX, centerY, 55, hue);
+        triggerFlash(0.6);
+        playReleaseSound();
       }
+
+      if (!armed[slot] && mouthRatio < REARM_THRESHOLD) {
+        armed[slot] = true;
+      }
+
+      drawChargeRing(box, charge[slot], hue);
+      spawnMotes(slot, box, hue, charge[slot]);
+      drawMotes(slot);
     }
 
     function resetFaceSlot(slot) {
       wasFacePresent[slot] = false;
-      identity[slot] = null;
+      charge[slot] = 0;
+      armed[slot] = true;
     }
 
     function drawIdleGlow(time) {
@@ -454,7 +477,7 @@
       ctx.arc(centerX, centerY, 150, 0, Math.PI * 2);
       ctx.fill();
 
-      drawUnmirroredText('STEP INTO FRAME', centerX, centerY + 170, 'rgba(127, 255, 212, 0.85)', canvas.width * 0.022);
+      drawUnmirroredText('OPEN MOUTH TO CHARGE', centerX, centerY + 170, 'rgba(127, 255, 212, 0.85)', canvas.width * 0.02);
     }
 
     function animationLoop() {
@@ -470,7 +493,6 @@
             drawIdleGlow(now);
             resetFaceSlot(0);
             resetFaceSlot(1);
-            drawBurstParticles();
           } else {
             faces.forEach((face, index) => {
               if (index > 1) return;
@@ -482,6 +504,9 @@
           console.error("Detection error:", error);
         }
       }
+
+      drawShockwaves();
+      drawBurstParticles();
 
       requestAnimationFrame(animationLoop);
     }
